@@ -4,22 +4,38 @@ A procedural, branching crypt generator that builds a multi-floor room graph, in
 
 ## Demo
 
-Click the overview image to open the generated interactive map. In the interactive version, select rooms from the overview or sidebar, hover rooms to trace stair connections, and use stairs and room features to explore.
+Click either image to open the generated interactive map. From the overview, click a room to open it; hover over rooms to trace stair connections. In room maps, use the mouse wheel or zoom controls to zoom, and drag to pan.
 
 [![Mileth Crypt overview map](output/maps/overview_map.png)](output/dungeon_map.html)
 
-The interactive HTML is generated locally by the script. The PNG above is a static preview for Markdown viewers.
+### Generated Room Example
 
-## Run
+This is the secret lore room, reached by descending five floors and then ascending from the lower route.
 
-Requires Python 3 and Matplotlib:
+[![Generated lore room 6-2](output/levels/room_6-2.png)](output/dungeon_map.html)
+
+## Setup
+
+Requires Python 3.9 or newer. Dependencies are listed in [requirements.txt](requirements.txt).
+
+### Windows PowerShell
 
 ```powershell
-python -m pip install matplotlib
+py -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe render_dungeon.py
+```
+
+### macOS or Linux
+
+```sh
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 python render_dungeon.py
 ```
 
-The script generates a 30-floor dungeon by default and opens the interactive map in your browser.
+The script generates a 30-floor dungeon by default, saves the overview and individual room images under `output/`, and opens `output/dungeon_map.html` in your browser.
 
 ## Output
 
