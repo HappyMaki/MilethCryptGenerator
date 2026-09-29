@@ -247,7 +247,7 @@ def render_and_save_overview_map(dungeon: DungeonPath) -> Tuple[str, str, List[D
             ax.add_patch(rect)
 
             label = room.room_id + (" *" if room.is_resting_area else "") + (" L" if room.is_lore_room else "")
-            ax.text(x_pos + room_width / 2, y_pos + 0.5, label, color="white", weight="bold", fontsize=8, ha="center",
+            ax.text(x_pos + room_width / 2, y_pos + 0.5, label, color="white", weight="bold", fontsize=11, ha="center",
                     va="center", zorder=4)
 
     for depth, rooms in dungeon.floors.items():
@@ -265,8 +265,14 @@ def render_and_save_overview_map(dungeon: DungeonPath) -> Tuple[str, str, List[D
                         ax.plot([start_pt[0], end_pt[0]], [start_pt[1], end_pt[1]],
                                 color="#f59e0b", lw=2.2, linestyle=(0, (5, 4)), zorder=1, alpha=0.95)
 
-    ax.set_title(dungeon.name + " (Cyan = Critical Path, Orange Dashed = Optional Paths, Red = Dead Ends, * = Rest Area, L = Lore Dead End)",
-                 color="#66fcf1", fontsize=10, weight="bold", pad=20)
+    # Split the heading so neither line runs wide enough to be downscaled into mush.
+    ax.set_title(dungeon.name, color="#66fcf1", fontsize=14, weight="bold", pad=26)
+    ax.text(
+        0.5, 1.0,
+        "Cyan = Critical Path   Orange Dashed = Optional Paths   Red = Dead Ends   "
+        "* = Rest Area   L = Lore Dead End",
+        transform=ax.transAxes, color="#66fcf1", fontsize=8, ha="center", va="bottom",
+    )
     ax.axis("off")
     plt.tight_layout()
 
@@ -280,16 +286,25 @@ def render_and_save_overview_map(dungeon: DungeonPath) -> Tuple[str, str, List[D
     crop_width = (tight_bbox.width + 2 * padding) * output_dpi
     crop_height = (tight_bbox.height + 2 * padding) * output_dpi
     pixel_scale = output_dpi / fig.dpi
+    # Room rectangles are stroked with linewidth=2 centred on their edge, so the ink
+    # extends half a point beyond the data bounds. Grow each hover box to cover that
+    # ink; otherwise the highlight sits a couple of pixels inside the box it outlines,
+    # which reads as the left column leaning right and the right column leaning left.
+    stroke_margin = 1.0 / 72.0 * output_dpi
     room_hotspots = []
     for room_id, (x_pos, y_pos, box_width, box_height) in room_boxes.items():
         top_left = ax.transData.transform((x_pos, y_pos + box_height))
         bottom_right = ax.transData.transform((x_pos + box_width, y_pos))
+        left_px = top_left[0] * pixel_scale - crop_left - stroke_margin
+        top_px = crop_top - top_left[1] * pixel_scale - stroke_margin
+        width_px = (bottom_right[0] - top_left[0]) * pixel_scale + 2 * stroke_margin
+        height_px = (top_left[1] - bottom_right[1]) * pixel_scale + 2 * stroke_margin
         room_hotspots.append({
             "room_id": room_id,
-            "left": (top_left[0] * pixel_scale - crop_left) / crop_width * 100,
-            "top": (crop_top - top_left[1] * pixel_scale) / crop_height * 100,
-            "width": (bottom_right[0] - top_left[0]) * pixel_scale / crop_width * 100,
-            "height": (top_left[1] - bottom_right[1]) * pixel_scale / crop_height * 100,
+            "left": left_px / crop_width * 100,
+            "top": top_px / crop_height * 100,
+            "width": width_px / crop_width * 100,
+            "height": height_px / crop_height * 100,
         })
 
     file_path = os.path.join(MAPS_DIR, "overview_map.png")
@@ -368,7 +383,7 @@ def build_interactive_html(dungeon: DungeonPath):
         button {{ background: #1f2833; color: #c5c6c7; border: 1px solid #45a29e; padding: 6px 10px; border-radius: 4px; cursor: pointer; font-weight: bold; }}
         button:hover, button.active {{ background: #66fcf1; color: #0b0c10; }}
         .btn-overview {{ width: 100%; padding: 12px; margin-bottom: 15px; }}
-        .viewport {{ position: relative; flex: 3; background: #0b0c10; padding: 15px; border-radius: 8px; border: 1px solid #1f2833; display: flex; justify-content: center; align-items: center; min-height: 600px; overflow: hidden; touch-action: none; cursor: grab; }}
+        .viewport {{ position: relative; flex: 3; background: #0b0c10; padding: 15px; border-radius: 8px; border: 1px solid #1f2833; display: flex; justify-content: center; align-items: center; min-height: 900px; overflow: hidden; touch-action: none; cursor: grab; }}
         .viewport.dragging, .viewport.dragging * {{ cursor: grabbing !important; user-select: none; }}
         .map-navigation {{ position: absolute; z-index: 10; top: 12px; right: 12px; display: flex; gap: 4px; }}
         .map-navigation button {{ min-width: 34px; height: 32px; padding: 0 8px; }}
@@ -380,9 +395,9 @@ def build_interactive_html(dungeon: DungeonPath):
         .map-connection {{ fill: none; stroke-width: 2.8; vector-effect: non-scaling-stroke; filter: drop-shadow(0 0 3px #050508); }}
         .map-connection.up {{ stroke: #f59e0b; }}
         .map-connection.down {{ stroke: #66fcf1; }}
-        .map-hotspot {{ position: absolute; z-index: 2; min-width: 0; min-height: 0; padding: 0; border: 1px solid transparent; border-radius: 1px; background: transparent; color: transparent; font-size: 0; pointer-events: auto; }}
+        .map-hotspot {{ position: absolute; z-index: 2; box-sizing: border-box; min-width: 0; min-height: 0; padding: 0; border: 0; border-radius: 1px; background: transparent; color: transparent; font-size: 0; pointer-events: auto; }}
         .map-hotspot:hover, .map-hotspot:focus-visible {{ background: rgba(102, 252, 241, 0.18); border-color: #66fcf1; outline: 2px solid #66fcf1; outline-offset: 1px; }}
-        img {{ max-width: 100%; max-height: 750px; border-radius: 4px; display: block; }}
+        img {{ max-width: 100%; max-height: 1100px; border-radius: 4px; display: block; }}
         #room-display {{ display: none; max-width: 100%; max-height: 750px; image-rendering: pixelated; }}
         .tile-tooltip {{ display: none; position: absolute; z-index: 5; padding: 6px 8px; color: #fff; background: #050508; border: 1px solid #66fcf1; border-radius: 4px; font-size: 12px; white-space: nowrap; pointer-events: none; }}
         .room-legend {{ display: none; max-width: 900px; flex-wrap: wrap; gap: 8px 14px; padding-top: 10px; color: #c5c6c7; font-size: 12px; }}
