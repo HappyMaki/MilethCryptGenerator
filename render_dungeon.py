@@ -310,9 +310,9 @@ def build_interactive_html(dungeon: DungeonPath):
                 <canvas id="room-display" aria-label="Dungeon room map. Click a stair to travel." tabindex="0"></canvas>
                 <div id="tile-tooltip" class="tile-tooltip" role="tooltip"></div>
                 <div id="room-legend" class="room-legend"></div>
-                <div id="room-actions" class="room-actions">
-                    <span id="gather-button" class="gather-display" role="img" aria-label="Gather Materials display. Hover over a gathering node to inspect it." title="Hover over a gathering node to inspect its materials.">Gather Materials</span>
-                </div>
+                # <div id="room-actions" class="room-actions">
+                #     <span id="gather-button" class="gather-display" role="img" aria-label="Gather Materials display. Hover over a gathering node to inspect it." title="Hover over a gathering node to inspect its materials.">Gather Materials</span>
+                # </div>
             </div>
         </div>
     </div>
