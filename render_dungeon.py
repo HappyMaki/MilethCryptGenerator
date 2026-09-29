@@ -25,6 +25,110 @@ def ensure_directories():
     os.makedirs(LEVELS_DIR, exist_ok=True)
 
 
+def export_dungeon_data(dungeon: DungeonPath) -> str:
+    coordinate = lambda position: {"x": position[0], "y": position[1]}
+    room_data = []
+
+    for floor_index, rooms in sorted(dungeon.floors.items()):
+        for room in rooms:
+            stairs = []
+            for position, destination in sorted(room.stair_destinations.items()):
+                symbol = room.bitmap[position[1]][position[0]]
+                stairs.append({
+                    "position": coordinate(position),
+                    "direction": "up" if symbol == "^" else "down",
+                    "symbol": symbol,
+                    "destination": {"kind": "surface"} if destination == "Surface" else {
+                        "kind": "room",
+                        "room_id": destination,
+                    },
+                })
+
+            gates = []
+            for gate_id, gate in sorted(room.gates.items()):
+                gate_data = {
+                    "id": gate_id,
+                    "door": coordinate(gate["door"]),
+                    "lever": coordinate(gate["lever"]),
+                    "tiles": [coordinate(position) for position in gate["tiles"]],
+                    "locked_tile_count": gate["locked_tiles"],
+                }
+                if "down_stair" in gate:
+                    gate_data["down_stair"] = coordinate(gate["down_stair"])
+                gates.append(gate_data)
+
+            room_data.append({
+                "id": room.room_id,
+                "floor_index": floor_index,
+                "overview_grid_position": {
+                    "x": room.grid_x,
+                    "floor_index": floor_index,
+                },
+                "flags": {
+                    "main_path": room.is_main_path,
+                    "dead_end": room.is_dead_end,
+                    "resting_area": room.is_resting_area,
+                    "lore_room": room.is_lore_room,
+                },
+                "connections": {
+                    "up": list(room.connected_from),
+                    "down": list(room.connected_to),
+                },
+                "tile_map": {
+                    "width": len(room.bitmap[0]),
+                    "height": len(room.bitmap),
+                    "origin": "top_left",
+                    "rows": room.bitmap,
+                },
+                "stairs": stairs,
+                "gates": gates,
+                "gathering_nodes": [
+                    {
+                        "position": coordinate(position),
+                        "material": node["material"],
+                        "amount": node["amount"],
+                    }
+                    for position, node in sorted(room.gathering_nodes.items())
+                ],
+                "monster_spawn_points": [
+                    coordinate(position)
+                    for position in sorted(room.monster_spawn_points)
+                ],
+            })
+
+    data = {
+        "schema_version": "1.0.0",
+        "coordinate_system": {
+            "tile_origin": "top_left",
+            "tile_x_axis": "right",
+            "tile_y_axis": "down",
+            "floor_indexing": "1_based_increases_deeper",
+            "unity_position_mapping": "(tile_x * tile_size, -floor_index * floor_height, -tile_y * tile_size)",
+        },
+        "tile_legend": BITMAP_LEGEND,
+        "dungeon": {
+            "name": dungeon.name,
+            "floor_count": len(dungeon.floors),
+            "room_count": len(room_data),
+            "critical_path_room_ids": list(dungeon.critical_path),
+            "floors": [
+                {
+                    "floor_index": floor_index,
+                    "room_ids": [room.room_id for room in rooms],
+                }
+                for floor_index, rooms in sorted(dungeon.floors.items())
+            ],
+        },
+        "rooms": room_data,
+    }
+
+    data_path = os.path.join(OUTPUT_DIR, "data.json")
+    with open(data_path, "w", encoding="utf-8") as data_file:
+        json.dump(data, data_file, ensure_ascii=False, indent=2)
+        data_file.write("\n")
+    return data_path
+
+
 # ==========================================
 # ISOMETRIC MATH HELPERS
 # ==========================================
@@ -202,6 +306,8 @@ def render_and_save_overview_map(dungeon: DungeonPath) -> Tuple[str, str, List[D
 
 def build_interactive_html(dungeon: DungeonPath):
     ensure_directories()
+    data_path = export_dungeon_data(dungeon)
+    print(f"Generated Dungeon Data -> {data_path}")
     overview_path, overview_b64, room_hotspots = render_and_save_overview_map(dungeon)
 
     for rooms in dungeon.floors.values():
@@ -282,10 +388,6 @@ def build_interactive_html(dungeon: DungeonPath):
         .room-legend {{ display: none; max-width: 900px; flex-wrap: wrap; gap: 8px 14px; padding-top: 10px; color: #c5c6c7; font-size: 12px; }}
         .room-legend-item {{ display: inline-flex; align-items: center; gap: 5px; }}
         .legend-swatch {{ width: 12px; height: 12px; border: 1px solid #808894; box-sizing: border-box; }}
-        .room-actions {{ display: none; justify-content: flex-end; max-width: 900px; padding-top: 12px; }}
-        .room-actions.visible {{ display: flex; }}
-        .gather-display {{ display: inline-flex; align-items: center; padding: 6px 10px; color: #c5c6c7; background: #1f2833; border: 1px solid #45a29e; border-radius: 4px; font-size: 13px; font-weight: bold; cursor: help; user-select: none; }}
-        .gather-display:hover {{ background: #273540; }}
     </style>
 </head>
 <body>
@@ -310,9 +412,6 @@ def build_interactive_html(dungeon: DungeonPath):
                 <canvas id="room-display" aria-label="Dungeon room map. Click a stair to travel." tabindex="0"></canvas>
                 <div id="tile-tooltip" class="tile-tooltip" role="tooltip"></div>
                 <div id="room-legend" class="room-legend"></div>
-                # <div id="room-actions" class="room-actions">
-                #     <span id="gather-button" class="gather-display" role="img" aria-label="Gather Materials display. Hover over a gathering node to inspect it." title="Hover over a gathering node to inspect its materials.">Gather Materials</span>
-                # </div>
             </div>
         </div>
     </div>
@@ -338,8 +437,6 @@ def build_interactive_html(dungeon: DungeonPath):
         const roomContext = roomDisplay.getContext('2d');
         const tileTooltip = document.getElementById('tile-tooltip');
         const roomLegend = document.getElementById('room-legend');
-        const roomActions = document.getElementById('room-actions');
-        const gatherButton = document.getElementById('gather-button');
         const mapWrapper = document.querySelector('.map-wrapper');
         const viewport = document.querySelector('.viewport');
         const zoomOutButton = document.getElementById('zoom-out');
@@ -595,15 +692,12 @@ def build_interactive_html(dungeon: DungeonPath):
             let description = `${{tileLegend[symbol].name}} (${{symbol}})`;
             if (symbol === '^' && destination) description = `Stairs Up to ${{destination}}`;
             if (symbol === 'v' && destination) description = `Stairs Down to ${{destination}}`;
-            if (symbol === 'G' && gatheringNode) description = `${{gatheringNode.material}} node. Gather ${{gatheringNode.amount}}`;
+            if (symbol === 'G' && gatheringNode) description = `${{gatheringNode.material}} resource node`;
             if (tile.gateId && symbol === 'D') description = openedGates[roomId].has(tile.gateId)
                 ? `Gate ${{tile.gateId}} is open`
                 : `Gate ${{tile.gateId}} is locked; pull its lever`;
             if (tile.gateId && symbol === 'V') description = `Lever for Gate ${{tile.gateId}}`;
             tileTooltip.textContent = `${{description}} | row ${{row + 1}}, column ${{column + 1}}`;
-            gatherButton.title = symbol === 'G' && gatheringNode
-                ? `${{gatheringNode.material}} node. Gather ${{gatheringNode.amount}}.`
-                : 'Hover over a gathering node to inspect its materials.';
             roomDisplay.style.cursor = destination ? 'pointer' : 'default';
             roomDisplay.setAttribute('aria-label', destination
                 ? `${{description}}. Click to travel.`
@@ -677,7 +771,6 @@ def build_interactive_html(dungeon: DungeonPath):
             overviewDisplay.style.display = 'block';
             roomDisplay.style.display = 'none';
             roomLegend.style.display = 'none';
-            roomActions.classList.remove('visible');
             tileTooltip.style.display = 'none';
             applyMapTransform();
         }}
@@ -691,7 +784,6 @@ def build_interactive_html(dungeon: DungeonPath):
             roomDisplay.style.display = 'block';
             roomDisplay.dataset.roomId = roomId;
             roomLegend.style.display = 'flex';
-            roomActions.classList.add('visible');
             tileTooltip.style.display = 'none';
             drawRoom(roomId);
             applyMapTransform();

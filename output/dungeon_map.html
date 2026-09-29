@@ -34,10 +34,6 @@
         .room-legend { display: none; max-width: 900px; flex-wrap: wrap; gap: 8px 14px; padding-top: 10px; color: #c5c6c7; font-size: 12px; }
         .room-legend-item { display: inline-flex; align-items: center; gap: 5px; }
         .legend-swatch { width: 12px; height: 12px; border: 1px solid #808894; box-sizing: border-box; }
-        .room-actions { display: none; justify-content: flex-end; max-width: 900px; padding-top: 12px; }
-        .room-actions.visible { display: flex; }
-        .gather-display { display: inline-flex; align-items: center; padding: 6px 10px; color: #c5c6c7; background: #1f2833; border: 1px solid #45a29e; border-radius: 4px; font-size: 13px; font-weight: bold; cursor: help; user-select: none; }
-        .gather-display:hover { background: #273540; }
     </style>
 </head>
 <body>
@@ -62,9 +58,6 @@
                 <canvas id="room-display" aria-label="Dungeon room map. Click a stair to travel." tabindex="0"></canvas>
                 <div id="tile-tooltip" class="tile-tooltip" role="tooltip"></div>
                 <div id="room-legend" class="room-legend"></div>
-                <div id="room-actions" class="room-actions">
-                    <span id="gather-button" class="gather-display" role="img" aria-label="Gather Materials display. Hover over a gathering node to inspect it." title="Hover over a gathering node to inspect its materials.">Gather Materials</span>
-                </div>
             </div>
         </div>
     </div>
@@ -90,8 +83,6 @@
         const roomContext = roomDisplay.getContext('2d');
         const tileTooltip = document.getElementById('tile-tooltip');
         const roomLegend = document.getElementById('room-legend');
-        const roomActions = document.getElementById('room-actions');
-        const gatherButton = document.getElementById('gather-button');
         const mapWrapper = document.querySelector('.map-wrapper');
         const viewport = document.querySelector('.viewport');
         const zoomOutButton = document.getElementById('zoom-out');
@@ -347,15 +338,12 @@
             let description = `${tileLegend[symbol].name} (${symbol})`;
             if (symbol === '^' && destination) description = `Stairs Up to ${destination}`;
             if (symbol === 'v' && destination) description = `Stairs Down to ${destination}`;
-            if (symbol === 'G' && gatheringNode) description = `${gatheringNode.material} node. Gather ${gatheringNode.amount}`;
+            if (symbol === 'G' && gatheringNode) description = `${gatheringNode.material} resource node`;
             if (tile.gateId && symbol === 'D') description = openedGates[roomId].has(tile.gateId)
                 ? `Gate ${tile.gateId} is open`
                 : `Gate ${tile.gateId} is locked; pull its lever`;
             if (tile.gateId && symbol === 'V') description = `Lever for Gate ${tile.gateId}`;
             tileTooltip.textContent = `${description} | row ${row + 1}, column ${column + 1}`;
-            gatherButton.title = symbol === 'G' && gatheringNode
-                ? `${gatheringNode.material} node. Gather ${gatheringNode.amount}.`
-                : 'Hover over a gathering node to inspect its materials.';
             roomDisplay.style.cursor = destination ? 'pointer' : 'default';
             roomDisplay.setAttribute('aria-label', destination
                 ? `${description}. Click to travel.`
@@ -429,7 +417,6 @@
             overviewDisplay.style.display = 'block';
             roomDisplay.style.display = 'none';
             roomLegend.style.display = 'none';
-            roomActions.classList.remove('visible');
             tileTooltip.style.display = 'none';
             applyMapTransform();
         }
@@ -443,7 +430,6 @@
             roomDisplay.style.display = 'block';
             roomDisplay.dataset.roomId = roomId;
             roomLegend.style.display = 'flex';
-            roomActions.classList.add('visible');
             tileTooltip.style.display = 'none';
             drawRoom(roomId);
             applyMapTransform();

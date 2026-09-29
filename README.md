@@ -40,6 +40,7 @@ The script generates a 30-floor dungeon by default, saves the overview and indiv
 ## Output
 
 - `output/dungeon_map.html` - interactive room browser with clickable overview rooms, stair-connection highlights, room maps, gate controls, and gathering-node details.
+- `output/data.json` - versioned, renderer-independent dungeon graph and full room tile/feature data for Unity or other consumers; see [json_schema.md](json_schema.md).
 - `output/maps/overview_map.png` - static overview of the generated room graph.
 - `output/levels/room_*.png` - rendered image for each generated room.
 
