@@ -20,6 +20,9 @@ MIN_SPAWN_ROOM_TILES = 100
 # Levers are wall mounted next to the gate they open, never scattered across the room.
 LEVER_MIN_DOOR_DISTANCE = 2
 LEVER_MAX_DOOR_DISTANCE = 4
+# A share of stairs on deeper floors get walled into a locked closet of their own.
+STAIR_CLOSET_CHANCE = 0.15
+STAIR_CLOSET_MIN_FLOOR = 3
 
 
 class RoomNode:
@@ -238,6 +241,148 @@ def _generate_secret_shaft_bitmap(
     return ["".join(row) for row in bitmap]
 
 
+def _seal_stair_closet(
+    room: RoomNode,
+    stair_position: Tuple[int, int],
+    gate_id: str,
+    rng: random.Random,
+) -> bool:
+    """
+    Walls an existing stair into its own 3x3 closet sealed by a locked gate.
+
+    The stair stays reachable only after the player works the gate open. Every tile
+    the closet consumes must be bare floor and clear of anything already placed, so
+    the room's stairs, gates, chests and nodes are never overwritten. Returns False
+    when the stair cannot be boxed in without disturbing the room.
+    """
+    height = len(room.bitmap)
+    width = len(room.bitmap[0])
+    center_x, center_y = stair_position
+
+    reserved = set(room.stair_destinations)
+    for gate in room.gates.values():
+        reserved.update(gate["tiles"])
+        reserved.add(gate["door"])
+        reserved.add(gate["lever"])
+    reserved.discard(stair_position)
+
+    def put(tile_x: int, tile_y: int, symbol: str) -> None:
+        # Rows are mutable lists while a room is still being generated and plain
+        # strings once the room is finished, so accept either representation.
+        row = room.bitmap[tile_y]
+        if isinstance(row, str):
+            room.bitmap[tile_y] = row[:tile_x] + symbol + row[tile_x + 1:]
+        else:
+            row[tile_x] = symbol
+
+    for offset_y in range(-1, 2):
+        for offset_x in range(-1, 2):
+            tile_x, tile_y = center_x + offset_x, center_y + offset_y
+            if not (0 <= tile_x < width and 0 <= tile_y < height):
+                return False
+            if (tile_x, tile_y) == stair_position:
+                continue
+            if room.bitmap[tile_y][tile_x] != ".":
+                return False
+    for offset_y in range(-2, 3):
+        for offset_x in range(-2, 3):
+            if abs(offset_x) != 2 and abs(offset_y) != 2:
+                continue
+            tile_x, tile_y = center_x + offset_x, center_y + offset_y
+            if not (0 <= tile_x < width and 0 <= tile_y < height):
+                return False
+            if room.bitmap[tile_y][tile_x] != ".":
+                return False
+            if any(
+                max(abs(tile_x - other[0]), abs(tile_y - other[1])) <= 2
+                for other in reserved
+            ):
+                return False
+
+    def outside_floor_count(side: str) -> int:
+        offsets = {
+            "top": [(center_x + step, center_y - 3) for step in (-1, 0, 1)],
+            "bottom": [(center_x + step, center_y + 3) for step in (-1, 0, 1)],
+            "left": [(center_x - 3, center_y + step) for step in (-1, 0, 1)],
+            "right": [(center_x + 3, center_y + step) for step in (-1, 0, 1)],
+        }[side]
+        return sum(
+            1
+            for tile_x, tile_y in offsets
+            if 0 <= tile_x < width and 0 <= tile_y < height and room.bitmap[tile_y][tile_x] == "."
+        )
+
+    def gate_tiles_for(side: str) -> List[Tuple[int, int]]:
+        return {
+            "top": [(center_x + step, center_y - 2) for step in (-1, 0, 1)],
+            "bottom": [(center_x + step, center_y + 2) for step in (-1, 0, 1)],
+            "left": [(center_x - 2, center_y + step) for step in (-1, 0, 1)],
+            "right": [(center_x + 2, center_y + step) for step in (-1, 0, 1)],
+        }[side]
+
+    closet_tiles = {
+        (center_x + offset_x, center_y + offset_y)
+        for offset_y in range(-1, 2)
+        for offset_x in range(-1, 2)
+    }
+    for offset_y in range(-2, 3):
+        for offset_x in range(-2, 3):
+            if abs(offset_x) == 2 or abs(offset_y) == 2:
+                put(center_x + offset_x, center_y + offset_y, "#")
+
+    outside_floor = [
+        (tile_x, tile_y)
+        for tile_y in range(height)
+        for tile_x in range(width)
+        if room.bitmap[tile_y][tile_x] == "."
+        and (tile_x, tile_y) not in closet_tiles
+    ]
+
+    for side in sorted(("top", "bottom", "left", "right"), key=lambda name: -outside_floor_count(name)):
+        gate_tiles = gate_tiles_for(side)
+        door = gate_tiles[1]
+        for tile_x, tile_y in gate_tiles:
+            put(tile_x, tile_y, "#")
+        put(*door, "D")
+        lever = _select_lever_tile(room.bitmap, outside_floor, door)
+        if lever is not None:
+            put(*lever, "V")
+            room.gates[gate_id] = {
+                "tiles": sorted(gate_tiles),
+                "door": door,
+                "lever": lever,
+                "locked_tiles": len(closet_tiles),
+            }
+            return True
+        put(*door, "#")
+
+    for offset_y in range(-2, 3):
+        for offset_x in range(-2, 3):
+            if abs(offset_x) == 2 or abs(offset_y) == 2:
+                put(center_x + offset_x, center_y + offset_y, ".")
+    return False
+
+
+def _seal_random_stair_closets(room: RoomNode, rng: random.Random) -> None:
+    """
+    Rolls a locked closet around a small share of a deep room's stairs.
+
+    Only rooms below the shallow floors qualify, so the early game stays open and the
+    gated stair chambers read as a deeper-dungeon flourish.
+    """
+    if room.floor_index <= STAIR_CLOSET_MIN_FLOOR:
+        return
+    # Rest areas are hand drawn string bitmaps, so only grid rooms qualify here.
+    if not room.bitmap or not isinstance(room.bitmap[0], list):
+        return
+    for stair_position in list(room.stair_destinations):
+        if rng.random() >= STAIR_CLOSET_CHANCE:
+            continue
+        if room.bitmap[stair_position[1]][stair_position[0]] not in ("^", "v"):
+            continue
+        _seal_stair_closet(room, stair_position, f"G{len(room.gates) + 1}", rng)
+
+
 def _place_secret_stair(
     room: RoomNode,
     target_id: str,
@@ -291,72 +436,24 @@ def _place_secret_stair(
         row[tile_x] = symbol
         room.bitmap[tile_y] = "".join(row)
 
-    def outside_floor_count(side: str) -> int:
-        offsets = {
-            "top": [(center_x + step, center_y - 3) for step in (-1, 0, 1)],
-            "bottom": [(center_x + step, center_y + 3) for step in (-1, 0, 1)],
-            "left": [(center_x - 3, center_y + step) for step in (-1, 0, 1)],
-            "right": [(center_x + 3, center_y + step) for step in (-1, 0, 1)],
-        }[side]
-        return sum(
-            1
-            for tile_x, tile_y in offsets
-            if 0 <= tile_x < width and 0 <= tile_y < height and room.bitmap[tile_y][tile_x] == "."
-        )
-
-    def gate_tiles_for(side: str) -> List[Tuple[int, int]]:
-        return {
-            "top": [(center_x + step, center_y - 2) for step in (-1, 0, 1)],
-            "bottom": [(center_x + step, center_y + 2) for step in (-1, 0, 1)],
-            "left": [(center_x - 2, center_y + step) for step in (-1, 0, 1)],
-            "right": [(center_x + 2, center_y + step) for step in (-1, 0, 1)],
-        }[side]
-
-    # Carve the 3x3 closet, then wall it in.
-    for offset_y in range(-1, 2):
-        for offset_x in range(-1, 2):
-            put(center_x + offset_x, center_y + offset_y, ".")
-    stair_position = (center_x, center_y)
-    put(center_x, center_y, "^")
-    for offset_y in range(-2, 3):
-        for offset_x in range(-2, 3):
-            if abs(offset_x) == 2 or abs(offset_y) == 2:
-                put(center_x + offset_x, center_y + offset_y, "#")
-
     closet_tiles = {
         (center_x + offset_x, center_y + offset_y)
         for offset_y in range(-1, 2)
         for offset_x in range(-1, 2)
     }
-    outside_floor = [
-        (tile_x, tile_y)
-        for tile_y in range(height)
-        for tile_x in range(width)
-        if room.bitmap[tile_y][tile_x] == "."
-        and (tile_x, tile_y) not in closet_tiles
-    ]
+    stair_position = (center_x, center_y)
+    for offset_y in range(-1, 2):
+        for offset_x in range(-1, 2):
+            row = list(room.bitmap[center_y + offset_y])
+            row[center_x + offset_x] = "."
+            room.bitmap[center_y + offset_y] = "".join(row)
+    put(*stair_position, "^")
+    room.stair_destinations[stair_position] = target_id
+    room.connected_from.append(target_id)
 
-    for side in sorted(("top", "bottom", "left", "right"), key=lambda name: -outside_floor_count(name)):
-        gate_tiles = gate_tiles_for(side)
-        door = gate_tiles[1]
-        for tile_x, tile_y in gate_tiles:
-            put(tile_x, tile_y, "#")
-        put(*door, "D")
-        lever = _select_lever_tile(room.bitmap, outside_floor, door)
-        if lever is not None:
-            put(*lever, "V")
-            room.stair_destinations[stair_position] = target_id
-            room.connected_from.append(target_id)
-            room.gates[f"G{len(room.gates) + 1}"] = {
-                "tiles": sorted(gate_tiles),
-                "door": door,
-                "lever": lever,
-                "locked_tiles": len(closet_tiles),
-            }
-            return stair_position
-        put(*door, "#")
-
-    return None
+    if not _seal_stair_closet(room, stair_position, f"G{len(room.gates) + 1}", rng):
+        return None
+    return stair_position
 
 
 def _add_lore_dead_end_route(dungeon: DungeonPath, floor: int, rng: random.Random) -> None:
@@ -857,14 +954,17 @@ def _generate_room_bitmap(room: RoomNode, rng: random.Random, spawn_point_ratio:
         bitmap[stair_y][stair_x] = "v"
         room.stair_destinations[(stair_x, stair_y)] = target_id
 
-    _connect_walkable_areas(
-        bitmap,
-        {next(iter(room.stair_destinations))},
-        door_walls,
-        door_tiles,
-        doorways,
-        rng,
-    )
+    # A room can end up with no stairs at all (no connections on either side), in
+    # which case there is no seed tile to flood fill from.
+    if room.stair_destinations:
+        _connect_walkable_areas(
+            bitmap,
+            {next(iter(room.stair_destinations))},
+            door_walls,
+            door_tiles,
+            doorways,
+            rng,
+        )
 
     for stair_position, target_id in list(room.stair_destinations.items()):
         stair_x, stair_y = stair_position
@@ -895,16 +995,21 @@ def _generate_room_bitmap(room: RoomNode, rng: random.Random, spawn_point_ratio:
             del room.stair_destinations[stair_position]
             room.stair_destinations[(new_x, new_y)] = target_id
 
-    _connect_walkable_areas(
-        bitmap,
-        {next(iter(room.stair_destinations))},
-        door_walls,
-        door_tiles,
-        doorways,
-        rng,
-    )
+    if room.stair_destinations:
+        _connect_walkable_areas(
+            bitmap,
+            {next(iter(room.stair_destinations))},
+            door_walls,
+            door_tiles,
+            doorways,
+            rng,
+        )
 
     room.gates = _place_gates(bitmap, room_floor_tiles, doorways, room.stair_destinations, rng)
+    # room.bitmap is only bound by the caller once this function returns, so publish
+    # the working grid now for the closet pass that reads and edits it.
+    room.bitmap = bitmap
+    _seal_random_stair_closets(room, rng)
 
     def place_tile(tile: str, count: int) -> List[Tuple[int, int]]:
         candidates = [
