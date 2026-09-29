@@ -689,6 +689,12 @@ def build_interactive_html(dungeon: DungeonPath):
             const tile = getRoomTile(event);
             if (!tile) return;
             const {{ roomId, row, column, symbol, destination, gatheringNode }} = tile;
+            // Plain floor carries no information, so hovering it shows no tooltip.
+            if (symbol === '.') {{
+                tileTooltip.style.display = 'none';
+                roomDisplay.style.cursor = 'default';
+                return;
+            }}
             let description = `${{tileLegend[symbol].name}} (${{symbol}})`;
             if (symbol === '^' && destination) description = `Stairs Up to ${{destination}}`;
             if (symbol === 'v' && destination) description = `Stairs Down to ${{destination}}`;

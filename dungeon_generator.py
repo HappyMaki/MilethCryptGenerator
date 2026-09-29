@@ -17,6 +17,9 @@ BITMAP_LEGEND = {
     "V": {"name": "Gate Lever", "color": "#c49a52"},
 }
 MIN_SPAWN_ROOM_TILES = 100
+# Levers are wall mounted next to the gate they open, never scattered across the room.
+LEVER_MIN_DOOR_DISTANCE = 2
+LEVER_MAX_DOOR_DISTANCE = 4
 
 
 class RoomNode:
@@ -205,17 +208,176 @@ def generate_procgen_dungeon(
     return dungeon
 
 
+def _generate_secret_shaft_bitmap(
+    room: RoomNode,
+    down_target: Optional[str],
+    up_target: Optional[str],
+    rng: random.Random,
+) -> List[str]:
+    """Builds the small 15x15 chamber used for one step of the lore secret shaft."""
+    width = height = 15
+    bitmap = [["#" for _ in range(width)] for _ in range(height)]
+    for tile_y in range(1, height - 1):
+        for tile_x in range(1, width - 1):
+            bitmap[tile_y][tile_x] = "."
+
+    room.stair_destinations = {}
+    if down_target is not None:
+        position = (rng.randint(4, 10), height - 2)
+        bitmap[position[1]][position[0]] = "v"
+        room.stair_destinations[position] = down_target
+        room.connected_to.append(down_target)
+    if up_target is not None:
+        position = (rng.randint(4, 10), 1)
+        bitmap[position[1]][position[0]] = "^"
+        room.stair_destinations[position] = up_target
+        room.connected_from.append(up_target)
+
+    room.gathering_nodes = {}
+    room.monster_spawn_points = []
+    return ["".join(row) for row in bitmap]
+
+
+def _place_secret_stair(
+    room: RoomNode,
+    target_id: str,
+    rng: random.Random,
+) -> Optional[Tuple[int, int]]:
+    """
+    Boxes the secret stair into its own walled closet and seals it behind a gate.
+
+    A 3x3 chamber is walled off from the room with a locked gate and a wall mounted
+    lever, so the stair that drops into the lore shaft is only reachable after the
+    player works the gate open. The whole footprint must be bare floor, so nothing
+    already placed in the room gets overwritten.
+    """
+    height = len(room.bitmap)
+    width = len(room.bitmap[0])
+
+    reserved = set(room.stair_destinations)
+    for gate in room.gates.values():
+        reserved.update(gate["tiles"])
+        reserved.add(gate["door"])
+        reserved.add(gate["lever"])
+
+    def footprint_clear(origin: Tuple[int, int]) -> bool:
+        origin_x, origin_y = origin
+        return all(
+            0 <= origin_x + offset_x < width
+            and 0 <= origin_y + offset_y < height
+            and room.bitmap[origin_y + offset_y][origin_x + offset_x] == "."
+            for offset_y in range(-2, 3)
+            for offset_x in range(-2, 3)
+        )
+
+    def spaced_clear(origin: Tuple[int, int]) -> bool:
+        return all(
+            max(abs(origin[0] - other[0]), abs(origin[1] - other[1])) > 3
+            for other in reserved
+        )
+
+    origins = [
+        (tile_x, tile_y)
+        for tile_y in range(2, height - 2)
+        for tile_x in range(2, width - 2)
+        if footprint_clear((tile_x, tile_y)) and spaced_clear((tile_x, tile_y))
+    ]
+    if not origins:
+        return None
+    center_x, center_y = rng.choice(origins)
+
+    def put(tile_x: int, tile_y: int, symbol: str) -> None:
+        row = list(room.bitmap[tile_y])
+        row[tile_x] = symbol
+        room.bitmap[tile_y] = "".join(row)
+
+    def outside_floor_count(side: str) -> int:
+        offsets = {
+            "top": [(center_x + step, center_y - 3) for step in (-1, 0, 1)],
+            "bottom": [(center_x + step, center_y + 3) for step in (-1, 0, 1)],
+            "left": [(center_x - 3, center_y + step) for step in (-1, 0, 1)],
+            "right": [(center_x + 3, center_y + step) for step in (-1, 0, 1)],
+        }[side]
+        return sum(
+            1
+            for tile_x, tile_y in offsets
+            if 0 <= tile_x < width and 0 <= tile_y < height and room.bitmap[tile_y][tile_x] == "."
+        )
+
+    def gate_tiles_for(side: str) -> List[Tuple[int, int]]:
+        return {
+            "top": [(center_x + step, center_y - 2) for step in (-1, 0, 1)],
+            "bottom": [(center_x + step, center_y + 2) for step in (-1, 0, 1)],
+            "left": [(center_x - 2, center_y + step) for step in (-1, 0, 1)],
+            "right": [(center_x + 2, center_y + step) for step in (-1, 0, 1)],
+        }[side]
+
+    # Carve the 3x3 closet, then wall it in.
+    for offset_y in range(-1, 2):
+        for offset_x in range(-1, 2):
+            put(center_x + offset_x, center_y + offset_y, ".")
+    stair_position = (center_x, center_y)
+    put(center_x, center_y, "^")
+    for offset_y in range(-2, 3):
+        for offset_x in range(-2, 3):
+            if abs(offset_x) == 2 or abs(offset_y) == 2:
+                put(center_x + offset_x, center_y + offset_y, "#")
+
+    closet_tiles = {
+        (center_x + offset_x, center_y + offset_y)
+        for offset_y in range(-1, 2)
+        for offset_x in range(-1, 2)
+    }
+    outside_floor = [
+        (tile_x, tile_y)
+        for tile_y in range(height)
+        for tile_x in range(width)
+        if room.bitmap[tile_y][tile_x] == "."
+        and (tile_x, tile_y) not in closet_tiles
+    ]
+
+    for side in sorted(("top", "bottom", "left", "right"), key=lambda name: -outside_floor_count(name)):
+        gate_tiles = gate_tiles_for(side)
+        door = gate_tiles[1]
+        for tile_x, tile_y in gate_tiles:
+            put(tile_x, tile_y, "#")
+        put(*door, "D")
+        lever = _select_lever_tile(room.bitmap, outside_floor, door)
+        if lever is not None:
+            put(*lever, "V")
+            room.stair_destinations[stair_position] = target_id
+            room.connected_from.append(target_id)
+            room.gates[f"G{len(room.gates) + 1}"] = {
+                "tiles": sorted(gate_tiles),
+                "door": door,
+                "lever": lever,
+                "locked_tiles": len(closet_tiles),
+            }
+            return stair_position
+        put(*door, "#")
+
+    return None
+
+
 def _add_lore_dead_end_route(dungeon: DungeonPath, floor: int, rng: random.Random) -> None:
+    """
+    Turns a side room on `floor` into a secret lore dead end reached by climbing a
+    shaft of small floors.
+
+    The lore room keeps a single stair leading down onto the first shaft floor, and
+    the shaft climbs back up to it one floor at a time. Every step is a small 15x15
+    room appended to its own floor, so the player walks across each floor and takes
+    a single stair per level instead of riding one stair that skips five floors.
+    """
     floor_rooms = dungeon.floors[floor]
     lore_room = next(
         room
         for index, room in enumerate(floor_rooms)
         if 0 < index < len(floor_rooms) - 1 and not room.is_main_path
     )
-    approach_room = next(room for room in dungeon.floors[floor] if room.is_main_path)
-    lower_floor = floor + 5
-    lower_room = next(room for room in dungeon.floors[lower_floor] if room.room_id == dungeon.critical_path[lower_floor - 1])
     lore_room_id = lore_room.room_id
+    shaft_depth = min(5, len(dungeon.floors) - floor)
+    shaft_floors = list(range(floor + 1, floor + 1 + shaft_depth))
 
     def set_tile(room: RoomNode, position: Tuple[int, int], tile: str) -> None:
         tile_x, tile_y = position
@@ -276,14 +438,6 @@ def _add_lore_dead_end_route(dungeon: DungeonPath, floor: int, rng: random.Rando
         raise ValueError(f"Lore room {lore_room_id} has no existing upper stair to replace")
 
     lore_down_position = accessible_floor_tile(lore_room, lore_entry_positions)
-    lower_entry_positions = [
-        position
-        for position in lower_room.stair_destinations
-        if lower_room.bitmap[position[1]][position[0]] == "^"
-    ]
-    if not lower_entry_positions:
-        raise ValueError(f"Lower room {lower_room.room_id} has no existing up stair")
-    lower_up_position = accessible_floor_tile(lower_room, lower_entry_positions)
 
     for upper_room, position in incoming:
         upper_room.connected_to.remove(lore_room_id)
@@ -294,8 +448,13 @@ def _add_lore_dead_end_route(dungeon: DungeonPath, floor: int, rng: random.Rando
             del lore_room.stair_destinations[position]
             set_tile(lore_room, position, ".")
 
-    for old_lower_id in lore_room.connected_to:
-        old_lower_room = next(room for room in dungeon.floors[floor + 1] if room.room_id == old_lower_id)
+    for old_lower_id in list(lore_room.connected_to):
+        old_lower_room = next(
+            room
+            for level in shaft_floors
+            for room in dungeon.floors[level]
+            if room.room_id == old_lower_id
+        )
         old_lower_room.connected_from.remove(lore_room_id)
         for position, destination in list(old_lower_room.stair_destinations.items()):
             if destination == lore_room_id and old_lower_room.bitmap[position[1]][position[0]] == "^":
@@ -306,19 +465,131 @@ def _add_lore_dead_end_route(dungeon: DungeonPath, floor: int, rng: random.Rando
             del lore_room.stair_destinations[position]
             set_tile(lore_room, position, ".")
 
+    # The bottom of the shaft has to open back into the dungeon, otherwise the lore
+    # room and the whole climb are unreachable. Link it to a side room one floor
+    # below so the player finds the shaft at its foot and climbs up to the secret.
+    bottom_floor = shaft_floors[-1]
+    host_room = next(
+        (room for room in dungeon.floors.get(bottom_floor + 1, ()) if not room.is_main_path),
+        None,
+    )
+    if host_room is None:
+        host_room = next(iter(dungeon.floors.get(bottom_floor + 1, ())), None)
+    if host_room is None:
+        host_room = next(iter(dungeon.floors.get(bottom_floor - 1, ())), None)
+
+    # Build the shaft top-down so every step knows the room above and below it.
+    # Each room is numbered on the floor it actually sits on, so the chain reads
+    # 9-4S, 10-1S, 11-1S ... as it descends instead of repeating one floor's index.
+    shaft_ids: List[str] = []
+    for shaft_floor in shaft_floors:
+        existing = {room.room_id for room in dungeon.floors[shaft_floor]}
+        next_index = 1
+        while f"{shaft_floor}-{next_index}" in existing:
+            next_index += 1
+        shaft_ids.append(f"{shaft_floor}-{next_index}S")
+
+    shaft_rooms: List[RoomNode] = []
+    for index, shaft_floor in enumerate(shaft_floors):
+        down_target = shaft_ids[index + 1] if index + 1 < len(shaft_floors) else (host_room.room_id if host_room else None)
+        up_target = lore_room_id if index == 0 else shaft_ids[index - 1]
+        shaft_room = RoomNode(
+            room_id=shaft_ids[index],
+            floor_index=shaft_floor,
+            grid_x=len(dungeon.floors[shaft_floor]),
+            is_main_path=False,
+        )
+        shaft_room.bitmap = _generate_secret_shaft_bitmap(shaft_room, down_target, up_target, rng)
+        dungeon.floors[shaft_floor].append(shaft_room)
+        shaft_rooms.append(shaft_room)
+
+    if host_room is not None and _place_secret_stair(host_room, shaft_ids[-1], rng) is None:
+        raise ValueError(f"Host room {host_room.room_id} has no clear tile for the secret stair")
+
+    first_shaft_room = shaft_rooms[0]
     lore_room.connected_from.clear()
-    lore_room.connected_to = [lower_room.room_id]
-    lower_room.connected_from.append(lore_room_id)
-    lore_room.stair_destinations[lore_down_position] = lower_room.room_id
+    lore_room.connected_to = [first_shaft_room.room_id]
+    first_shaft_room.connected_from.append(lore_room_id)
+    lore_room.stair_destinations[lore_down_position] = first_shaft_room.room_id
     set_tile(lore_room, lore_down_position, "v")
-    lower_room.stair_destinations[lower_up_position] = lore_room_id
-    set_tile(lower_room, lower_up_position, "^")
     lore_room.is_lore_room = True
     lore_room.is_dead_end = True
 
     if not any(tile == "L" for row in lore_room.bitmap for tile in row):
         lore_tile = accessible_floor_tile(lore_room, [lore_down_position])
         set_tile(lore_room, lore_tile, "L")
+
+
+def _select_lever_tile(
+    bitmap: List[List[str]],
+    floor_tiles: List[Tuple[int, int]],
+    door_position: Tuple[int, int],
+    solid_wall_tiles: Optional[set[Tuple[int, int]]] = None,
+) -> Optional[Tuple[int, int]]:
+    """
+    Picks the wall tile a gate lever is mounted on.
+
+    Levers are never scattered randomly: they are always pressed against a wall
+    between LEVER_MIN_DOOR_DISTANCE and LEVER_MAX_DOOR_DISTANCE squares of the
+    door they open, so players find the mechanism right beside the gate. The
+    search is deterministic - the closest wall tile to the door wins, with
+    stable tie breaks - so the same room always yields the same lever tile.
+    """
+    door_x, door_y = door_position
+    height = len(bitmap)
+    width = len(bitmap[0])
+    solid = set(solid_wall_tiles) if solid_wall_tiles else set()
+
+    def is_wall(tile_x: int, tile_y: int) -> bool:
+        return (
+            0 <= tile_x < width
+            and 0 <= tile_y < height
+            and (bitmap[tile_y][tile_x] == "#" or (tile_x, tile_y) in solid)
+        )
+
+    def lever_rank(tile: Tuple[int, int]) -> Tuple[int, int, int, int, int]:
+        """Closer to the door first, then hugging the door's own wall, then stable."""
+        tile_x, tile_y = tile
+        offset_x = abs(tile_x - door_x)
+        offset_y = abs(tile_y - door_y)
+        shares_door_row_or_column = 0 if offset_x == 0 or offset_y == 0 else 1
+        wall_neighbours = sum(
+            is_wall(neighbor_x, neighbor_y)
+            for neighbor_x, neighbor_y in (
+                (tile_x - 1, tile_y),
+                (tile_x + 1, tile_y),
+                (tile_x, tile_y - 1),
+                (tile_x, tile_y + 1),
+            )
+        )
+        return (
+            offset_x + offset_y,
+            shares_door_row_or_column,
+            -wall_neighbours,
+            tile_y,
+            tile_x,
+        )
+
+    candidates = [
+        tile
+        for tile in floor_tiles
+        if bitmap[tile[1]][tile[0]] == "."
+        and LEVER_MIN_DOOR_DISTANCE
+        <= abs(tile[0] - door_x) + abs(tile[1] - door_y)
+        <= LEVER_MAX_DOOR_DISTANCE
+        and any(
+            is_wall(neighbor_x, neighbor_y)
+            for neighbor_x, neighbor_y in (
+                (tile[0] - 1, tile[1]),
+                (tile[0] + 1, tile[1]),
+                (tile[0], tile[1] - 1),
+                (tile[0], tile[1] + 1),
+            )
+        )
+    ]
+    if not candidates:
+        return None
+    return min(candidates, key=lever_rank)
 
 
 def _generate_rest_area_bitmap(room: RoomNode) -> List[str]:
@@ -333,7 +604,15 @@ def _generate_rest_area_bitmap(room: RoomNode) -> List[str]:
     gate_tiles = [(divider_x, tile_y) for tile_y in range(7, 12)]
     gate_door = gate_tiles[len(gate_tiles) // 2]
     bitmap[gate_door[1]][gate_door[0]] = "D"
-    lever = (8, 9)
+    # The lever belongs on the divider wall beside the gate, not out in the open room.
+    lever = _select_lever_tile(
+        bitmap,
+        [(tile_x, tile_y) for tile_y in range(1, height - 1) for tile_x in range(1, divider_x)],
+        gate_door,
+        solid_wall_tiles=set(gate_tiles),
+    )
+    if lever is None:
+        raise ValueError(f"Rest area {room.room_id} has no wall tile beside its gate for a lever")
     bitmap[lever[1]][lever[0]] = "V"
 
     def spread_rows(count: int) -> List[int]:
@@ -815,13 +1094,6 @@ def _place_gates(
                 if not has_stair_spot and not has_existing_stair:
                     continue
 
-            lever_candidates = [
-                point for point in room_floor_tiles
-                if point in after_closing and bitmap[point[1]][point[0]] == "."
-            ]
-            if not lever_candidates:
-                continue
-
             door_position = min(
                 doorway_tiles,
                 key=lambda point: sum(
@@ -829,13 +1101,17 @@ def _place_gates(
                     for other_x, other_y in doorway_tiles
                 ),
             )
-            lever_candidates.sort(
-                key=lambda point: min(
-                    abs(point[0] - door_x) + abs(point[1] - door_y)
-                    for door_x, door_y in doorway_tiles
-                )
+            # The lever must sit on the player side of the gate, against a wall,
+            # 2-4 squares from the door it opens.
+            lever_position = _select_lever_tile(
+                bitmap,
+                [point for point in room_floor_tiles if point in after_closing],
+                door_position,
+                solid_wall_tiles=set(doorway_tiles),
             )
-            candidates.append((len(locked_section), doorway, doorway_tiles, door_position, locked_section, lever_candidates[:12]))
+            if lever_position is None:
+                continue
+            candidates.append((len(locked_section), doorway, doorway_tiles, door_position, locked_section, lever_position))
 
         if not candidates:
             break
@@ -843,10 +1119,9 @@ def _place_gates(
         candidates.sort(key=lambda candidate: candidate[0], reverse=True)
         preferred = candidates[:min(3, len(candidates))]
         weights = [candidate[0] for candidate in preferred]
-        locked_count, doorway, doorway_tiles, door_position, locked_section, lever_candidates = rng.choices(
+        locked_count, doorway, doorway_tiles, door_position, locked_section, lever_position = rng.choices(
             preferred, weights=weights, k=1
         )[0]
-        lever_position = rng.choice(lever_candidates)
         gate_id = f"G{gate_index + 1}"
 
         for tile_x, tile_y in doorway_tiles:
@@ -997,114 +1272,6 @@ def _carve_corridor(
                 cross_x, cross_y = cross_tile
                 if bitmap[cross_y][cross_x] == "#" and cross_tile not in door_walls:
                     bitmap[cross_y][cross_x] = "."
-
-
-    def _place_gates(
-        bitmap: List[List[str]],
-        room_floor_tiles: List[Tuple[int, int]],
-        doorways: List[frozenset[Tuple[int, int]]],
-        stair_destinations: Dict[Tuple[int, int], str],
-        rng: random.Random,
-    ) -> Dict[str, Dict[str, object]]:
-        stair_entries = [
-            position for position in stair_destinations
-            if bitmap[position[1]][position[0]] == "^"
-        ]
-        if not stair_entries:
-            return {}
-
-        start = stair_entries[0]
-        height = len(bitmap)
-        width = len(bitmap[0])
-
-        def reachable(blocked: set[Tuple[int, int]]) -> set[Tuple[int, int]]:
-            visited = {start}
-            queue = deque([start])
-            while queue:
-                tile_x, tile_y = queue.popleft()
-                for neighbor in ((tile_x - 1, tile_y), (tile_x + 1, tile_y), (tile_x, tile_y - 1), (tile_x, tile_y + 1)):
-                    neighbor_x, neighbor_y = neighbor
-                    if (
-                        0 < neighbor_x < width - 1
-                        and 0 < neighbor_y < height - 1
-                        and neighbor not in visited
-                        and neighbor not in blocked
-                        and bitmap[neighbor_y][neighbor_x] not in ("#", "D")
-                    ):
-                        visited.add(neighbor)
-                        queue.append(neighbor)
-            return visited
-
-        closed_tiles: set[Tuple[int, int]] = set()
-        gates: Dict[str, Dict[str, object]] = {}
-        used_doorways = set()
-        walkable_count = sum(tile != "#" for row in bitmap for tile in row)
-        minimum_locked_area = max(12, int(walkable_count * 0.025))
-        target_gate_count = rng.choices((1, 2, 3), weights=(6, 3, 1))[0]
-
-        for gate_index in range(target_gate_count):
-            current_reachable = reachable(closed_tiles)
-            candidates = []
-            for doorway in doorways:
-                if doorway in used_doorways or len(doorway) < 5 or doorway & closed_tiles:
-                    continue
-                doorway_tiles = {position for position in doorway if bitmap[position[1]][position[0]] not in ("#", "D")}
-                if len(doorway_tiles) < 5:
-                    continue
-                after_closing = reachable(closed_tiles | doorway_tiles)
-                locked_section = current_reachable - after_closing
-                if len(locked_section) < minimum_locked_area:
-                    continue
-
-                lever_candidates = [
-                    position for position in room_floor_tiles
-                    if position in after_closing and bitmap[position[1]][position[0]] == "."
-                ]
-                if not lever_candidates:
-                    continue
-
-                door_center = min(
-                    doorway_tiles,
-                    key=lambda position: sum(
-                        max(abs(position[0] - other_x), abs(position[1] - other_y))
-                        for other_x, other_y in doorway_tiles
-                    ),
-                )
-                lever_candidates.sort(
-                    key=lambda position: min(
-                        abs(position[0] - door_x) + abs(position[1] - door_y)
-                        for door_x, door_y in doorway_tiles
-                    )
-                )
-                best_levers = lever_candidates[:min(12, len(lever_candidates))]
-                candidates.append((len(locked_section), doorway, doorway_tiles, door_center, after_closing, best_levers))
-
-            if not candidates:
-                break
-
-            candidates.sort(key=lambda candidate: candidate[0], reverse=True)
-            preferred = candidates[:min(3, len(candidates))]
-            weights = [candidate[0] for candidate in preferred]
-            locked_count, doorway, doorway_tiles, door_position, _, lever_candidates = rng.choices(
-                preferred, weights=weights, k=1
-            )[0]
-            lever_position = rng.choice(lever_candidates)
-            gate_id = f"G{gate_index + 1}"
-
-            for tile_x, tile_y in doorway_tiles:
-                bitmap[tile_y][tile_x] = "#"
-            bitmap[door_position[1]][door_position[0]] = "D"
-            bitmap[lever_position[1]][lever_position[0]] = "V"
-            closed_tiles.update(doorway_tiles)
-            used_doorways.add(doorway)
-            gates[gate_id] = {
-                "tiles": sorted(doorway_tiles),
-                "door": door_position,
-                "lever": lever_position,
-                "locked_tiles": locked_count,
-            }
-
-        return gates
 
 
 def _connect_walkable_areas(
