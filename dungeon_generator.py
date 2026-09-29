@@ -1,5 +1,6 @@
 import random
 from collections import deque
+from math import ceil
 from typing import List, Dict, Optional, Tuple
 
 
@@ -7,13 +8,15 @@ BITMAP_LEGEND = {
     ".": {"name": "Floor", "color": "#454744"},
     "#": {"name": "Wall", "color": "#242b2a"},
     "C": {"name": "Chest", "color": "#b0974f"},
-    "T": {"name": "Torch", "color": "#b46f3d"},
-    "^": {"name": "Stairs Up", "color": "#60846e"},
-    "v": {"name": "Stairs Down", "color": "#925c58"},
+    "G": {"name": "Gathering Node", "color": "#6f9b65"},
+    "M": {"name": "Monster Spawn Point", "color": "#b34a3c"},
+    "^": {"name": "Stairs Up", "color": "#32f66b"},
+    "v": {"name": "Stairs Down", "color": "#ff2b4f"},
     "L": {"name": "Lore Event", "color": "#647b8a"},
     "D": {"name": "Locked Gate", "color": "#a34e43"},
     "V": {"name": "Gate Lever", "color": "#c49a52"},
 }
+MIN_SPAWN_ROOM_TILES = 100
 
 
 class RoomNode:
@@ -24,10 +27,14 @@ class RoomNode:
         self.grid_x = grid_x
         self.is_main_path = is_main_path
         self.is_dead_end = False
+        self.is_resting_area = False
+        self.is_lore_room = False
         self.connected_to: List[str] = []    # Stair connections leading Down
         self.connected_from: List[str] = []  # Stair connections leading Up
         self.bitmap: List[str] = []
         self.stair_destinations: Dict[Tuple[int, int], str] = {}
+        self.gathering_nodes: Dict[Tuple[int, int], Dict[str, object]] = {}
+        self.monster_spawn_points: List[Tuple[int, int]] = []
         self.gates: Dict[str, Dict[str, object]] = {}
 
 
@@ -43,22 +50,43 @@ def generate_procgen_dungeon(
     name: str = "Mileth Crypt Path",
     num_floors: int = 10,
     dead_end_depth_pct: float = 0.65,
-    seed: Optional[int] = None
+    seed: Optional[int] = None,
+    spawn_point_ratio: float = 0.0045,
 ) -> DungeonPath:
     """
     Generates a procedural dungeon topology with a guaranteed critical path,
     optional branching paths, restricted deep dead ends, and orphan pruning.
+    Spawn point ratio is the desired number of wall markers per walkable tile.
     """
+    if not 0 <= spawn_point_ratio <= 1:
+        raise ValueError("spawn_point_ratio must be between 0 and 1")
+
     dungeon = DungeonPath(name)
     rng = random.Random(seed)
 
     # Floor depth threshold where dead ends start appearing (e.g., floor >= 4 on a 10-floor dungeon)
     min_dead_end_floor = int(num_floors * (1.0 - dead_end_depth_pct)) + 1
+    interior_floors = list(range(2, num_floors))
+    multi_room_floors = {
+        min(interior_floors, key=lambda floor: abs(floor / num_floors - target_fraction))
+        for target_fraction in (0.35, 0.65)
+    } if interior_floors else set()
+    if len(multi_room_floors) < min(2, len(interior_floors)):
+        multi_room_floors.update(floor for floor in interior_floors if floor not in multi_room_floors)
+        multi_room_floors = set(sorted(multi_room_floors)[:min(2, len(interior_floors))])
+    lore_floor = max(2, min(num_floors - 5, int(num_floors * 0.3))) if num_floors >= 7 else None
+    if lore_floor is not None:
+        multi_room_floors.add(lore_floor)
 
     # 1. Instantiate Rooms per floor
     for floor in range(1, num_floors + 1):
         dungeon.floors[floor] = []
-        room_count = 1 if (floor == 1 or floor == num_floors) else rng.randint(2, 4)
+        room_count = (
+            1 if (floor == 1 or floor == num_floors)
+            else 4 if floor == lore_floor
+            else rng.randint(3, 4) if floor in multi_room_floors
+            else rng.randint(2, 4)
+        )
         main_x = rng.randint(0, room_count - 1)
 
         for x in range(room_count):
@@ -85,12 +113,17 @@ def generate_procgen_dungeon(
 
         for room in upper_rooms:
             if room.is_main_path:
-                # Critical path rooms can branch off to lower non-main rooms
-                non_main_below = [r for r in lower_rooms if not r.is_main_path]
-                if non_main_below and rng.random() < 0.6:
-                    target = rng.choice(non_main_below)
-                    if target.room_id not in room.connected_to:
-                        room.connected_to.append(target.room_id)
+                if floor + 1 in multi_room_floors:
+                    for target in lower_rooms:
+                        if target.room_id not in room.connected_to:
+                            room.connected_to.append(target.room_id)
+                else:
+                    # Critical path rooms can branch off to lower non-main rooms
+                    non_main_below = [r for r in lower_rooms if not r.is_main_path]
+                    if non_main_below and rng.random() < 0.6:
+                        target = rng.choice(non_main_below)
+                        if target.room_id not in room.connected_to:
+                            room.connected_to.append(target.room_id)
             else:
                 # TOP SAFE ZONE: Force non-main rooms to connect down to avoid high-level dead ends
                 if floor < min_dead_end_floor:
@@ -137,6 +170,14 @@ def generate_procgen_dungeon(
             room.room_id = room_id_map[room.room_id]
             room.connected_to = [room_id_map[target_id] for target_id in room.connected_to]
     dungeon.critical_path = [room_id_map[room_id] for room_id in dungeon.critical_path]
+    reachable_ids = {room_id_map[room_id] for room_id in reachable_ids}
+
+    rest_floors = [floor for floor in dungeon.floors if 0.7 <= floor / num_floors <= 0.9]
+    if not rest_floors:
+        rest_floors = list(dungeon.floors)
+    rest_floor = min(rest_floors, key=lambda floor: abs(floor / num_floors - 0.8))
+    rest_room_id = dungeon.critical_path[rest_floor - 1]
+    next(room for room in dungeon.floors[rest_floor] if room.room_id == rest_room_id).is_resting_area = True
 
     # 5. Mark Dead End Flags & Populate Upward Connections
     for floor in range(1, num_floors + 1):
@@ -156,12 +197,180 @@ def generate_procgen_dungeon(
 
     for floor, rooms in dungeon.floors.items():
         for room in rooms:
-            room.bitmap = _generate_room_bitmap(room, rng)
+            room.bitmap = _generate_room_bitmap(room, rng, spawn_point_ratio)
+
+    if lore_floor is not None:
+        _add_lore_dead_end_route(dungeon, lore_floor, rng)
 
     return dungeon
 
 
-def _generate_room_bitmap(room: RoomNode, rng: random.Random) -> List[str]:
+def _add_lore_dead_end_route(dungeon: DungeonPath, floor: int, rng: random.Random) -> None:
+    floor_rooms = dungeon.floors[floor]
+    lore_room = next(
+        room
+        for index, room in enumerate(floor_rooms)
+        if 0 < index < len(floor_rooms) - 1 and not room.is_main_path
+    )
+    approach_room = next(room for room in dungeon.floors[floor] if room.is_main_path)
+    lower_floor = floor + 5
+    lower_room = next(room for room in dungeon.floors[lower_floor] if room.room_id == dungeon.critical_path[lower_floor - 1])
+    lore_room_id = lore_room.room_id
+
+    def set_tile(room: RoomNode, position: Tuple[int, int], tile: str) -> None:
+        tile_x, tile_y = position
+        row = list(room.bitmap[tile_y])
+        row[tile_x] = tile
+        room.bitmap[tile_y] = "".join(row)
+
+    def accessible_floor_tile(room: RoomNode, starts: List[Tuple[int, int]]) -> Tuple[int, int]:
+        height = len(room.bitmap)
+        width = len(room.bitmap[0])
+        visited = set(starts)
+        queue = deque(starts)
+        while queue:
+            tile_x, tile_y = queue.popleft()
+            for neighbor_x, neighbor_y in (
+                (tile_x - 1, tile_y),
+                (tile_x + 1, tile_y),
+                (tile_x, tile_y - 1),
+                (tile_x, tile_y + 1),
+            ):
+                neighbor = (neighbor_x, neighbor_y)
+                if (
+                    0 < neighbor_x < width - 1
+                    and 0 < neighbor_y < height - 1
+                    and neighbor not in visited
+                    and room.bitmap[neighbor_y][neighbor_x] not in ("#", "D")
+                ):
+                    visited.add(neighbor)
+                    queue.append(neighbor)
+        candidates = [
+            (tile_x, tile_y)
+            for tile_x, tile_y in visited
+            if room.bitmap[tile_y][tile_x] == "."
+        ]
+        if not candidates:
+            candidates = [
+                (tile_x, tile_y)
+                for tile_y, row in enumerate(room.bitmap)
+                for tile_x, tile in enumerate(row)
+                if tile == "."
+            ]
+        if not candidates:
+            raise ValueError(f"No available stair tile in room {room.room_id}")
+        return rng.choice(candidates)
+
+    incoming = [
+        (room, position)
+        for room in dungeon.floors[floor - 1]
+        for position, destination in room.stair_destinations.items()
+        if destination == lore_room_id and room.bitmap[position[1]][position[0]] == "v"
+    ]
+    lore_entry_positions = [
+        position
+        for position in lore_room.stair_destinations
+        if lore_room.bitmap[position[1]][position[0]] == "^"
+    ]
+    if not lore_entry_positions:
+        raise ValueError(f"Lore room {lore_room_id} has no existing upper stair to replace")
+
+    lore_down_position = accessible_floor_tile(lore_room, lore_entry_positions)
+    lower_entry_positions = [
+        position
+        for position in lower_room.stair_destinations
+        if lower_room.bitmap[position[1]][position[0]] == "^"
+    ]
+    if not lower_entry_positions:
+        raise ValueError(f"Lower room {lower_room.room_id} has no existing up stair")
+    lower_up_position = accessible_floor_tile(lower_room, lower_entry_positions)
+
+    for upper_room, position in incoming:
+        upper_room.connected_to.remove(lore_room_id)
+        del upper_room.stair_destinations[position]
+        set_tile(upper_room, position, ".")
+    for position, destination in list(lore_room.stair_destinations.items()):
+        if lore_room.bitmap[position[1]][position[0]] == "^":
+            del lore_room.stair_destinations[position]
+            set_tile(lore_room, position, ".")
+
+    for old_lower_id in lore_room.connected_to:
+        old_lower_room = next(room for room in dungeon.floors[floor + 1] if room.room_id == old_lower_id)
+        old_lower_room.connected_from.remove(lore_room_id)
+        for position, destination in list(old_lower_room.stair_destinations.items()):
+            if destination == lore_room_id and old_lower_room.bitmap[position[1]][position[0]] == "^":
+                del old_lower_room.stair_destinations[position]
+                set_tile(old_lower_room, position, ".")
+    for position, destination in list(lore_room.stair_destinations.items()):
+        if lore_room.bitmap[position[1]][position[0]] == "v":
+            del lore_room.stair_destinations[position]
+            set_tile(lore_room, position, ".")
+
+    lore_room.connected_from.clear()
+    lore_room.connected_to = [lower_room.room_id]
+    lower_room.connected_from.append(lore_room_id)
+    lore_room.stair_destinations[lore_down_position] = lower_room.room_id
+    set_tile(lore_room, lore_down_position, "v")
+    lower_room.stair_destinations[lower_up_position] = lore_room_id
+    set_tile(lower_room, lower_up_position, "^")
+    lore_room.is_lore_room = True
+    lore_room.is_dead_end = True
+
+    if not any(tile == "L" for row in lore_room.bitmap for tile in row):
+        lore_tile = accessible_floor_tile(lore_room, [lore_down_position])
+        set_tile(lore_room, lore_tile, "L")
+
+
+def _generate_rest_area_bitmap(room: RoomNode) -> List[str]:
+    width, height = 40, 20
+    divider_x = width // 2
+    bitmap = [["#" for _ in range(width)] for _ in range(height)]
+    for tile_y in range(1, height - 1):
+        for tile_x in range(1, width - 1):
+            bitmap[tile_y][tile_x] = "."
+        bitmap[tile_y][divider_x] = "#"
+
+    gate_tiles = [(divider_x, tile_y) for tile_y in range(7, 12)]
+    gate_door = gate_tiles[len(gate_tiles) // 2]
+    bitmap[gate_door[1]][gate_door[0]] = "D"
+    lever = (8, 9)
+    bitmap[lever[1]][lever[0]] = "V"
+
+    def spread_rows(count: int) -> List[int]:
+        return [round(2 + index * (height - 5) / (count + 1)) for index in range(1, count + 1)]
+
+    room.stair_destinations = {}
+    for destination, tile_y in zip(room.connected_from, spread_rows(len(room.connected_from))):
+        position = (3, tile_y)
+        bitmap[position[1]][position[0]] = "^"
+        room.stair_destinations[position] = destination
+    for destination, tile_y in zip(room.connected_to, spread_rows(len(room.connected_to))):
+        position = (width - 4, tile_y)
+        bitmap[position[1]][position[0]] = "v"
+        room.stair_destinations[position] = destination
+
+    locked_tiles = sum(
+        bitmap[tile_y][tile_x] != "#"
+        for tile_y in range(1, height - 1)
+        for tile_x in range(divider_x + 1, width - 1)
+    )
+    room.gates = {
+        "G1": {
+            "tiles": gate_tiles,
+            "door": gate_door,
+            "lever": lever,
+            "locked_tiles": locked_tiles,
+        }
+    }
+    room.gathering_nodes = {}
+    room.monster_spawn_points = []
+    return ["".join(row) for row in bitmap]
+
+
+def _generate_room_bitmap(room: RoomNode, rng: random.Random, spawn_point_ratio: float) -> List[str]:
+    if room.is_resting_area:
+        return _generate_rest_area_bitmap(room)
+
     if room.floor_index <= 3 or rng.random() < 0.1:
         minimum_dimension, maximum_dimension = 20, 40
     else:
@@ -320,12 +529,6 @@ def _generate_room_bitmap(room: RoomNode, rng: random.Random) -> List[str]:
             and (tile_x, tile_y) not in stair_positions
             and all(max(abs(tile_x - door_x), abs(tile_y - door_y)) > 2 for door_x, door_y in door_tiles)
         ]
-        if not candidates:
-            candidates = [
-                (tile_x, tile_y)
-                for tile_x, tile_y in room_floor_tiles
-                if bitmap[tile_y][tile_x] == "." and (tile_x, tile_y) not in stair_positions
-            ]
         positions = []
         for _ in range(min(count, len(candidates))):
             if not stair_positions and not positions:
@@ -424,27 +627,106 @@ def _generate_room_bitmap(room: RoomNode, rng: random.Random) -> List[str]:
 
     room.gates = _place_gates(bitmap, room_floor_tiles, doorways, room.stair_destinations, rng)
 
-    def place_tile(tile: str, count: int) -> None:
+    def place_tile(tile: str, count: int) -> List[Tuple[int, int]]:
         candidates = [
             (tile_x, tile_y)
             for tile_x, tile_y in room_floor_tiles
             if bitmap[tile_y][tile_x] == "."
         ]
+        placed = []
         for _ in range(min(count, len(candidates))):
             tile_x, tile_y = rng.choice(candidates)
             bitmap[tile_y][tile_x] = tile
             candidates.remove((tile_x, tile_y))
+            placed.append((tile_x, tile_y))
+        return placed
 
     area_scale = min(4, 1 + width * height // 2200)
-    place_tile("T", rng.randint(1, area_scale))
+    room.gathering_nodes = {}
+    for position in place_tile("G", rng.randint(1, area_scale)):
+        room.gathering_nodes[position] = {
+            "material": rng.choice(("Stone", "Ore", "Herbs", "Timber")),
+            "amount": rng.randint(1, 3),
+        }
     chest_count = rng.choices((0, 1, 2), weights=(6, 3, 1) if room.is_dead_end else (7, 3, 1))[0]
     for _ in range(chest_count):
         place_tile("C", 1)
 
-    lore_count = 1 if room.is_dead_end or rng.random() < 0.3 else 0
+    lore_count = 1 if room.is_lore_room or room.is_dead_end or rng.random() < 0.3 else 0
     place_tile("L", lore_count)
 
+    floor_tile_count = sum(tile not in ("#", "D") for row in bitmap for tile in row)
+    spawn_point_count = (
+        0
+        if room.is_resting_area or floor_tile_count < MIN_SPAWN_ROOM_TILES
+        else ceil(floor_tile_count * spawn_point_ratio)
+    )
+    room.monster_spawn_points = _place_monster_spawn_points(
+        bitmap,
+        spawn_point_count,
+        door_tiles,
+        room.stair_destinations,
+        room.gates,
+        rng,
+    )
+
     return ["".join(row) for row in bitmap]
+
+
+def _place_monster_spawn_points(
+    bitmap: List[List[str]],
+    count: int,
+    door_tiles: set[Tuple[int, int]],
+    stair_destinations: Dict[Tuple[int, int], str],
+    gates: Dict[str, Dict[str, object]],
+    rng: random.Random,
+) -> List[Tuple[int, int]]:
+    height = len(bitmap)
+    width = len(bitmap[0])
+    reserved = set(door_tiles) | set(stair_destinations)
+    for gate in gates.values():
+        reserved.update(gate["tiles"])
+        reserved.add(gate["door"])
+        reserved.add(gate["lever"])
+
+    walkable_tiles = {".", "C", "G", "L", "^", "v", "V"}
+    candidates = [
+        (tile_x, tile_y)
+        for tile_y in range(1, height - 1)
+        for tile_x in range(1, width - 1)
+        if bitmap[tile_y][tile_x] == "#"
+        and any(
+            bitmap[neighbor_y][neighbor_x] in walkable_tiles
+            for neighbor_x, neighbor_y in (
+                (tile_x - 1, tile_y),
+                (tile_x + 1, tile_y),
+                (tile_x, tile_y - 1),
+                (tile_x, tile_y + 1),
+            )
+        )
+        and all(max(abs(tile_x - reserved_x), abs(tile_y - reserved_y)) > 2 for reserved_x, reserved_y in reserved)
+    ]
+
+    selected = []
+    while candidates and len(selected) < count:
+        if not selected:
+            position = rng.choice(candidates)
+        else:
+            distances = {
+                position: min(
+                    abs(position[0] - placed_x) + abs(position[1] - placed_y)
+                    for placed_x, placed_y in selected
+                )
+                for position in candidates
+            }
+            greatest_distance = max(distances.values())
+            farthest_candidates = [position for position, distance in distances.items() if distance == greatest_distance]
+            position = rng.choice(farthest_candidates)
+        selected.append(position)
+        candidates.remove(position)
+        bitmap[position[1]][position[0]] = "M"
+
+    return selected
 
 
 def _place_gates(
